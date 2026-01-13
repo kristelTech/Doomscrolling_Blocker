@@ -175,31 +175,34 @@ class DoomscrollDetector:
         return False
 
     def play_rickroll(self):
-        #Play rickroll video with autoplay (only if not already playing)
+        # Play rickroll video with autoplay (only if not already playing)
         if not self.is_rickrolling and os.path.exists(self.rickroll_path):
             self.is_rickrolling = True
+            
             # Use system default video player with autoplay in background thread
             def start_video():
                 if os.name == 'posix':  # macOS/Linux
                     if os.uname().sysname == 'Darwin':  # macOS
-                        # Use afplay for audio or osascript to force QuickTime to play
                         self.rickroll_process = subprocess.Popen(
                             ['osascript', '-e', f'tell application "QuickTime Player" to open POSIX file "{os.path.abspath(self.rickroll_path)}"',
                              '-e', 'tell application "QuickTime Player" to play front document'],
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL
                         )
-                    else:  # Linux
-                        # Try vlc first because of autoplay, fallback to xdg-open
+                    else:  # Linux (Modified to use play_video.sh)
                         try:
+                            # Calls the bash script passing the video path as $1
                             self.rickroll_process = subprocess.Popen(
-                                ['vlc', '--play-and-exit', self.rickroll_path],
+                                ['bash', 'play_video.sh', self.rickroll_path],
                                 stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL
                             )
-                        except:
+                        except Exception as e:
+                            print(f"Error launching script: {e}")
+                            # Fallback if script fails
                             self.rickroll_process = subprocess.Popen(['xdg-open', self.rickroll_path])
-                else:  # Windows - Someone test on windows pls
+                
+                else:  # Windows
                     os.startfile(self.rickroll_path)
 
             # Start video in background thread to avoid blocking
@@ -212,9 +215,19 @@ class DoomscrollDetector:
             self.is_rickrolling = False
             if self.rickroll_process:
                 try:
-                    # Kill the video player process
-                    if os.uname().sysname == 'Darwin':  # macOS
+                    sys_name = os.uname().sysname if os.name == 'posix' else ''
+                    
+                    # macOS Cleanup
+                    if sys_name == 'Darwin':
                         subprocess.run(['killall', 'QuickTime Player'], stderr=subprocess.DEVNULL)
+                    
+                    # Linux Cleanup (Added)
+                    # Because we launched via a bash script, terminating the process 
+                    # only kills the bash wrapper, not VLC. We must kill VLC explicitly.
+                    elif sys_name == 'Linux':
+                        subprocess.run(['killall', 'vlc'], stderr=subprocess.DEVNULL)
+
+                    # Terminate the direct child process (the bash script)
                     self.rickroll_process.terminate()
                 except:
                     pass
