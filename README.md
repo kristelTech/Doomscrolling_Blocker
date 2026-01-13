@@ -19,6 +19,12 @@ A Python program that uses your webcam to detect when you're looking down at you
 pip install -r requirements.txt
 ```
 
+### (if you use linux)
+
+```bash
+chmod +x play_video.sh
+```
+
 ### Manual Install
 
 #### Basic (OpenCV only)
