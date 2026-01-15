@@ -5,6 +5,7 @@ import time
 import threading
 import subprocess
 import os
+from datetime import timedelta
 
 class DoomscrollDetector:
     def __init__(self):
@@ -62,12 +63,20 @@ class DoomscrollDetector:
         # Detection state tracking for stability
         self.doomscroll_count = 0
         self.normal_count = 0
-        self.detection_threshold = 3  # Frames needed to confirm state change
+        self.detection_threshold = 8  # Need 8 consecutive frames (~0.25 seconds) to trigger
 
-        # Detection state tracking for stability
-        self.doomscroll_count = 0
-        self.normal_count = 0
-        self.detection_threshold = 1  # Instant response
+        # ===== NEW: Time tracking and statistics =====
+        self.session_start_time = time.time()
+        self.focus_time = 0  # Total focused time in seconds
+        self.doomscroll_time = 0  # Total doomscrolling time in seconds
+        self.rickroll_triggers = 0  # Number of times rickroll was triggered
+        self.last_state = None  # Track previous state ('focus' or 'doomscroll')
+        self.state_start_time = time.time()  # When current state started
+        self.has_triggered_rickroll_this_session = False  # Track if rickroll triggered in current doomscroll session
+        
+        # Calibration period - don't detect for first few seconds
+        self.calibration_period = 3.0  # seconds
+        self.is_calibrated = False
 
     def detect_doomscroll_dlib(self, frame, gray):
         """Detect doomscrolling using dlib landmarks"""
@@ -81,7 +90,7 @@ class DoomscrollDetector:
             chin = (landmarks.part(8).x, landmarks.part(8).y)
             forehead_approx = (landmarks.part(27).x, landmarks.part(27).y)
 
-            # Left eye points (36-41) // I PLAYED AROUND WITH THESE NUMBERS IDK
+            # Left eye points (36-41)
             left_eye_points = [(landmarks.part(i).x, landmarks.part(i).y) for i in range(36, 42)]
             # Right eye points (42-47)
             right_eye_points = [(landmarks.part(i).x, landmarks.part(i).y) for i in range(42, 48)]
@@ -104,7 +113,7 @@ class DoomscrollDetector:
             head_tilt = (chin[1] - nose_tip[1]) / (nose_tip[1] - forehead_approx[1] + 1e-6)
 
             # Looking down if head tilted forward or eyes positioned low
-            is_looking_down = head_tilt > 1.3 or eye_ratio < 0.35
+            is_looking_down = head_tilt > 1.4 or eye_ratio < 0.32
 
             # Draw debug points
             cv2.circle(frame, nose_tip, 3, (0, 255, 0), -1)
@@ -138,14 +147,14 @@ class DoomscrollDetector:
             frame_height = frame.shape[0]
             face_position_ratio = face_center_y / frame_height
 
-            if face_position_ratio > 0.58:
+            if face_position_ratio > 0.62:  # Face very low in frame
                 detection_score += 2
-            elif face_position_ratio > 0.52:
+            elif face_position_ratio > 0.55:  # Face somewhat low
                 detection_score += 1
 
             # 2. Check face aspect ratio (looking down = face appears shorter/wider)
             aspect_ratio = h / w
-            if aspect_ratio < 1.1:  # Face appears wider than normal
+            if aspect_ratio < 1.08:  # Face appears significantly wider than normal
                 detection_score += 1
 
             # 3. Also check eye positions
@@ -155,9 +164,9 @@ class DoomscrollDetector:
                 eye_position_in_face = (avg_eye_y - y) / h
 
                 # If eyes are in lower part of detected face region = looking down
-                if eye_position_in_face > 0.6:
+                if eye_position_in_face > 0.62:  # Eyes very low in face
                     detection_score += 2
-                elif eye_position_in_face > 0.52:
+                elif eye_position_in_face > 0.55:  # Eyes somewhat low
                     detection_score += 1
 
                 # Draw eye rectangles
@@ -167,16 +176,45 @@ class DoomscrollDetector:
                 # If we can't detect eyes well, might be looking down
                 detection_score += 1
 
-            # Decision: doomscrolling if score >= 3
+            # Decision: doomscrolling if score >= 3 (balanced sensitivity)
             is_looking_down = detection_score >= 3
 
             return is_looking_down
 
         return False
 
+    def update_time_tracking(self, is_doomscrolling):
+        """Update time tracking based on current state"""
+        current_time = time.time()
+        elapsed = current_time - self.state_start_time
+        
+        # Determine current state
+        current_state = 'doomscroll' if is_doomscrolling else 'focus'
+        
+        # If state changed, update times
+        if current_state != self.last_state and self.last_state is not None:
+            if self.last_state == 'focus':
+                self.focus_time += elapsed
+            elif self.last_state == 'doomscroll':
+                self.doomscroll_time += elapsed
+                # Reset rickroll trigger flag when leaving doomscroll state
+                self.has_triggered_rickroll_this_session = False
+            
+            self.state_start_time = current_time
+            self.last_state = current_state
+        elif self.last_state is None:
+            # First state initialization
+            self.last_state = current_state
+            self.state_start_time = current_time
+
     def play_rickroll(self):
-        #Play rickroll video with autoplay (only if not already playing)
+        """Play rickroll video with autoplay (only if not already playing)"""
         if not self.is_rickrolling and os.path.exists(self.rickroll_path):
+            # Only increment counter once per doomscroll session
+            if not self.has_triggered_rickroll_this_session:
+                self.rickroll_triggers += 1
+                self.has_triggered_rickroll_this_session = True
+            
             self.is_rickrolling = True
             # Use system default video player with autoplay in background thread
             def start_video():
@@ -199,7 +237,7 @@ class DoomscrollDetector:
                             )
                         except:
                             self.rickroll_process = subprocess.Popen(['xdg-open', self.rickroll_path])
-                else:  # Windows - Someone test on windows pls
+                else:  # Windows
                     os.startfile(self.rickroll_path)
 
             # Start video in background thread to avoid blocking
@@ -244,6 +282,55 @@ class DoomscrollDetector:
         cv2.putText(frame, self.current_roast, (w//2 - 300, 100),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
+    def format_time(self, seconds):
+        """Format seconds into readable time string"""
+        return str(timedelta(seconds=int(seconds)))
+
+    def show_stats(self, frame):
+        """Display statistics on frame"""
+        h, w = frame.shape[:2]
+        
+        # Current session info
+        current_time = time.time()
+        elapsed = current_time - self.state_start_time
+        
+        # Add current state time to totals for display
+        display_focus_time = self.focus_time
+        display_doomscroll_time = self.doomscroll_time
+        
+        if self.last_state == 'focus':
+            display_focus_time += elapsed
+        elif self.last_state == 'doomscroll':
+            display_doomscroll_time += elapsed
+        
+        total_session_time = current_time - self.session_start_time
+        
+        # Create semi-transparent background for stats
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (10, h - 140), (400, h - 10), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+        
+        # Display stats
+        y_offset = h - 120
+        cv2.putText(frame, "=== SESSION STATS ===", (20, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        y_offset += 25
+        cv2.putText(frame, f"Focus Time: {self.format_time(display_focus_time)}", (20, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        
+        y_offset += 25
+        cv2.putText(frame, f"Doomscroll Time: {self.format_time(display_doomscroll_time)}", (20, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+        
+        y_offset += 25
+        cv2.putText(frame, f"Rickrolls Triggered: {self.rickroll_triggers}", (20, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 165, 0), 1)
+        
+        y_offset += 25
+        cv2.putText(frame, f"Total Time: {self.format_time(total_session_time)}", (20, y_offset),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
     def run(self):
         """Main loop"""
         cap = cv2.VideoCapture(0)
@@ -254,6 +341,7 @@ class DoomscrollDetector:
 
         print("Doomscrolling Blocker Started!")
         print("Looking for your face...")
+        print("Calibrating for 3 seconds - sit normally...")
         print("Press 'q' to quit")
 
         while cap.isOpened():
@@ -265,6 +353,22 @@ class DoomscrollDetector:
             # Flip frame horizontally for mirror view
             frame = cv2.flip(frame, 1)
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+            # Check if still in calibration period
+            time_elapsed = time.time() - self.session_start_time
+            if not self.is_calibrated:
+                if time_elapsed < self.calibration_period:
+                    # Show calibration message
+                    remaining = int(self.calibration_period - time_elapsed) + 1
+                    cv2.putText(frame, f"CALIBRATING... {remaining}", (10, 30),
+                               cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 165, 255), 2)
+                    cv2.imshow('Doomscrolling Blocker', frame)
+                    if cv2.waitKey(5) & 0xFF == ord('q'):
+                        break
+                    continue
+                else:
+                    self.is_calibrated = True
+                    print("Calibration complete! Now monitoring...")
 
             # Detect doomscrolling
             if self.use_dlib:
@@ -284,6 +388,9 @@ class DoomscrollDetector:
             is_doomscrolling = self.doomscroll_count >= self.detection_threshold
             is_normal = self.normal_count >= self.detection_threshold
 
+            # Update time tracking
+            self.update_time_tracking(is_doomscrolling)
+
             if is_doomscrolling:
                 self.show_roast(frame)
                 # Play rickroll when doomscrolling
@@ -299,12 +406,25 @@ class DoomscrollDetector:
                 cv2.putText(frame, "Monitoring...", (10, 30),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
+            # Always show stats
+            self.show_stats(frame)
+
             # Display frame
             cv2.imshow('Doomscrolling Blocker', frame)
 
             # Exit on 'q'
             if cv2.waitKey(5) & 0xFF == ord('q'):
                 break
+
+        # Final stats before cleanup
+        print("\n" + "="*50)
+        print("SESSION SUMMARY")
+        print("="*50)
+        print(f"Total Focus Time: {self.format_time(self.focus_time)}")
+        print(f"Total Doomscroll Time: {self.format_time(self.doomscroll_time)}")
+        print(f"Rickrolls Triggered: {self.rickroll_triggers}")
+        print(f"Total Session Time: {self.format_time(time.time() - self.session_start_time)}")
+        print("="*50)
 
         # Cleanup
         self.stop_rickroll()
