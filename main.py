@@ -174,6 +174,172 @@ class DoomscrollDetector:
 
         return False
 
+    def detect_available_cameras(self):
+        """Detect available cameras with their names"""
+        available_cameras = []
+        camera_names = self.get_camera_names()
+        
+        for camera_index in range(10):  # Check first 10 indices
+            cap = cv2.VideoCapture(camera_index)
+            if cap.isOpened():
+                camera_name = camera_names.get(camera_index, f"Camera {camera_index}")
+                available_cameras.append((camera_index, camera_name))
+                cap.release()
+        return available_cameras
+
+    def get_camera_names(self):
+        """Get camera names from the system"""
+        camera_names = {}
+        
+        try:
+            import platform
+            if platform.system() == 'Windows':
+                # Try to get camera names from Windows using PowerShell
+                camera_names = self._get_windows_camera_names()
+            elif platform.system() == 'Linux':
+                # Try to get camera names from Linux
+                camera_names = self._get_linux_camera_names()
+            elif platform.system() == 'Darwin':
+                # Try to get camera names from macOS
+                camera_names = self._get_macos_camera_names()
+        except:
+            pass
+        
+        return camera_names
+
+    def _get_windows_camera_names(self):
+        """Get camera names on Windows"""
+        camera_names = {}
+        try:
+            import subprocess
+        
+            ps_command = "Get-PnpDevice -Class Camera | Select-Object FriendlyName | Select-Object -ExpandProperty FriendlyName"
+            try:
+                result = subprocess.run(['powershell', '-Command', ps_command], 
+                                       capture_output=True, text=True, timeout=5)
+                if result.returncode == 0 and result.stdout.strip():
+                    camera_list = result.stdout.strip().split('\n')
+                    for idx, name in enumerate(camera_list):
+                        if name.strip():
+                            camera_names[idx] = name.strip()
+            except:
+                pass
+            
+            # Fallback: try WMI module
+            if not camera_names:
+                try:
+                    import wmi
+                    c = wmi.WMI()
+                    devices = c.Win32_PnPDevice()
+                    idx = 0
+                    for device in devices:
+                        if device.Description and ('camera' in device.Description.lower() or 'video' in device.Description.lower() or 'webcam' in device.Description.lower()):
+                            camera_names[idx] = device.Description
+                            idx += 1
+                except:
+                    pass
+            
+            # Fallback: try registry access
+            if not camera_names:
+                try:
+                    import winreg
+                    # Try to read from the camera/video device registry
+                    paths = [
+                        r"SYSTEM\CurrentControlSet\Services\usbvideo",
+                        r"SYSTEM\CurrentControlSet\Enum\USB"
+                    ]
+                    idx = 0
+                    for path in paths:
+                        try:
+                            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path)
+                            subkey_idx = 0
+                            while True:
+                                try:
+                                    subkey_name = winreg.EnumKey(key, subkey_idx)
+                                    subkey_idx += 1
+                                    subkey = winreg.OpenKey(key, subkey_name)
+                                    try:
+                                        name, _ = winreg.QueryValueEx(subkey, "FriendlyName")
+                                        if 'camera' in name.lower() or 'video' in name.lower():
+                                            camera_names[idx] = name
+                                            idx += 1
+                                    except:
+                                        pass
+                                    finally:
+                                        winreg.CloseKey(subkey)
+                                except OSError:
+                                    break
+                            winreg.CloseKey(key)
+                        except:
+                            pass
+                except:
+                    pass
+        except:
+            pass
+        
+        return camera_names
+
+    def _get_linux_camera_names(self):
+        """Get camera names on Linux"""
+        camera_names = {}
+        try:
+            import subprocess
+            for i in range(10):
+                path = f"/sys/class/video4linux/video{i}/name"
+                try:
+                    with open(path, 'r') as f:
+                        name = f.read().strip()
+                        camera_names[i] = name
+                except:
+                    pass
+        except:
+            pass
+        
+        return camera_names
+
+    def _get_macos_camera_names(self):
+        """Get camera names on macOS"""
+        camera_names = {}
+        try:
+            import subprocess
+            result = subprocess.run(['system_profiler', 'SPCameraDataType'], 
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                lines = result.stdout.split('\n')
+                idx = 0
+                for line in lines:
+                    if 'Model' in line:
+                        name = line.split(':')[1].strip()
+                        camera_names[idx] = name
+                        idx += 1
+        except:
+            pass
+        
+        return camera_names
+
+    def select_camera(self):
+        """Prompt user to select a camera"""
+        available_cameras = self.detect_available_cameras()
+        
+        if not available_cameras:
+            print("No cameras found!")
+            return 0
+        
+        print("\nAvailable cameras:")
+        for idx, (camera_id, camera_name) in enumerate(available_cameras):
+            print(f"  {idx + 1}. {camera_name}")
+        
+        while True:
+            try:
+                choice = input(f"\nSelect a camera (1-{len(available_cameras)}): ").strip()
+                choice_idx = int(choice) - 1
+                if 0 <= choice_idx < len(available_cameras):
+                    return available_cameras[choice_idx][0]
+                else:
+                    print(f"Please enter a number between 1 and {len(available_cameras)}")
+            except ValueError:
+                print("Invalid input. Please enter a number.")
+
     def play_rickroll(self):
         #Play rickroll video with autoplay (only if not already playing)
         if not self.is_rickrolling and os.path.exists(self.rickroll_path):
@@ -246,10 +412,12 @@ class DoomscrollDetector:
 
     def run(self):
         """Main loop"""
-        cap = cv2.VideoCapture(0)
+        # Let user select camera
+        selected_camera = self.select_camera()
+        cap = cv2.VideoCapture(selected_camera)
 
         if not cap.isOpened():
-            print("Error: Could not open webcam")
+            print(f"Error: Could not open camera {selected_camera}")
             return
 
         print("Doomscrolling Blocker Started!")
